@@ -53,8 +53,9 @@ public class ScreenRecordService extends Service implements EventManager.Listene
 
     private boolean isRecorderStarted = false;
 
-    private int screenWidth;
-    private int screenHeight;
+    // MODIFIED: Use these variables for a capped recording resolution.
+    private int recordingWidth;
+    private int recordingHeight;
     private int screenDensity;
 
     private int resultCode;
@@ -68,9 +69,31 @@ public class ScreenRecordService extends Service implements EventManager.Listene
         WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         if (windowManager != null) {
             windowManager.getDefaultDisplay().getMetrics(metrics);
-            screenWidth = metrics.widthPixels;
-            screenHeight = metrics.heightPixels;
             screenDensity = metrics.densityDpi;
+
+            // --- MODIFIED: Calculate a capped resolution to control file size ---
+            // We cap the longer side to 1280 pixels, and calculate the other side based on aspect ratio.
+            // 720p is a good balance of quality and size. For higher quality, you can use 1920 (1080p).
+            final int MAX_RESOLUTION = 720;
+
+            float screenWidth = metrics.widthPixels;
+            float screenHeight = metrics.heightPixels;
+            float aspectRatio = screenWidth / screenHeight;
+
+            if (screenWidth > screenHeight) { // Landscape
+                recordingWidth = MAX_RESOLUTION;
+                recordingHeight = (int) (recordingWidth / aspectRatio);
+            } else { // Portrait
+                recordingHeight = MAX_RESOLUTION;
+                recordingWidth = (int) (recordingHeight * aspectRatio);
+            }
+
+            // Encoders often require even dimensions
+            if (recordingWidth % 2 != 0) recordingWidth--;
+            if (recordingHeight % 2 != 0) recordingHeight--;
+
+            Log.d(TAG, "Device resolution: " + screenWidth + "x" + screenHeight + ", Capped recording to: " + recordingWidth + "x" + recordingHeight);
+            // --- END MODIFICATION ---
         }
         mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         createNotificationChannel();
@@ -153,15 +176,27 @@ public class ScreenRecordService extends Service implements EventManager.Listene
         }
         mediaRecorder.setOutputFile(videoFilePath);
 
-        mediaRecorder.setVideoSize(screenWidth, screenHeight);
+        // --- MODIFIED: Apply optimized settings ---
+        // 1. Use the capped resolution calculated in onCreate.
+        mediaRecorder.setVideoSize(recordingWidth, recordingHeight);
         mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+
         try {
             mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
             mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            // 2. Set an explicit audio bitrate. 128kbps is good quality for voice.
+            mediaRecorder.setAudioEncodingBitRate(128 * 1024);
         } catch (Exception ignored) {
+            Log.w(TAG, "Audio source setup failed. Recording without audio.");
         }
-        mediaRecorder.setVideoEncodingBitRate(8 * 1024 * 1024);
-        mediaRecorder.setVideoFrameRate(30);
+
+        // 3. Lower the video bitrate. 8Mbps is high. 2.5Mbps (2.5 * 1024 * 1024) is a good starting point for 720p.
+        // A higher bitrate like 4Mbps will give better quality when paused. Let's use 4Mbps.
+        mediaRecorder.setVideoEncodingBitRate(4 * 1024 * 1024);
+
+        // 4. Lower the frame rate. 24fps is sufficient for most screen recordings.
+        mediaRecorder.setVideoFrameRate(24);
+        // --- END MODIFICATION ---
 
         mediaRecorder.prepare();
         Log.d(TAG, "MediaRecorder prepared successfully.");
@@ -171,7 +206,6 @@ public class ScreenRecordService extends Service implements EventManager.Listene
         String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         String fileName = "ScreenRecord_" + timeStamp + ".mp4";
 
-        // Use app-specific storage which requires no permissions
         File dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
         if (dir == null) {
             Log.e(TAG, "Failed to get external files directory.");
@@ -187,8 +221,9 @@ public class ScreenRecordService extends Service implements EventManager.Listene
             Log.e(TAG, "Cannot create virtual display, MediaProjection is null.");
             return;
         }
+        // MODIFIED: Use the same capped resolution for the virtual display.
         virtualDisplay = mediaProjection.createVirtualDisplay("ScreenRecordService",
-                screenWidth, screenHeight, screenDensity,
+                recordingWidth, recordingHeight, screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 mediaRecorder.getSurface(), null, null);
         Log.d(TAG, "Virtual display created.");
